@@ -28,5 +28,5 @@ echo "== 2/3 代码测试与构建检查 =="
 python -m pytest -q tests
 python -m compileall -q app smoke tests
 
-echo "== 3/3 HTTP 冒烟（μ 扩展 / ν 收敛 / 危险迁移 / 拒绝不发编号）=="
+echo "== 3/3 HTTP 冒烟（μ 扩展 / ν 收敛 / 危险迁移 / 拒绝不发编号 / 策略审计）=="
 python smoke/smoke_http.py

@@ -1,8 +1,10 @@
 """固定点复核 HTTP 接口。
 
-POST /api/v1/reviews          创建复核（校验失败不落库、不返回编号）
-GET  /api/v1/reviews/{id}     按编号读取结论与规范证据
-GET  /healthz                 健康检查
+POST /api/v1/reviews                 创建复核（校验失败不落库、不返回编号）
+GET  /api/v1/reviews/{id}            按编号读取结论与规范证据
+POST /api/v1/reviews/{id}/audits     在已保存复核上发起策略审计（有限奇偶博弈）
+GET  /api/v1/audits/{id}             按编号读取审计结论、胜方区域与位置策略
+GET  /healthz                        健康检查
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
+from .audit import build_audit
 from .service import RequestError, build_review
 from .storage import ReviewStore
 
@@ -66,7 +69,8 @@ async def request_error_handler(_: Request, exc: RequestError) -> JSONResponse:
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     store = _store_or_503()
-    return {"status": "ok", "version": __version__, "reviews": store.count()}
+    return {"status": "ok", "version": __version__, "reviews": store.count(),
+            "audits": store.count_audits()}
 
 
 @app.post("/api/v1/reviews", status_code=201)
@@ -115,3 +119,38 @@ async def read_review(review_id: int) -> JSONResponse:
     record_out = dict(record)
     record_out["review_id"] = review_id
     return JSONResponse(content=record_out)
+
+
+@app.post("/api/v1/reviews/{review_id}/audits", status_code=201)
+async def create_audit(review_id: int) -> JSONResponse:
+    store = _store_or_503()
+    record = store.get(review_id)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND",
+                               "message": f"编号 {review_id} 的复核记录不存在，无法发起审计",
+                               "details": []}},
+        )
+    # 审计完全由已保存的复核编号推导（公式闭包 × 位置 × 绑定层级），
+    # 求解与自检完成后才落库。
+    audit = build_audit(review_id, record)
+    audit_id = store.create_audit(review_id, audit)
+    audit_out = dict(audit)
+    audit_out["audit_id"] = audit_id
+    return JSONResponse(status_code=201, content=audit_out)
+
+
+@app.get("/api/v1/audits/{audit_id}")
+async def read_audit(audit_id: int) -> JSONResponse:
+    audit = _store_or_503().get_audit(audit_id)
+    if audit is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND",
+                               "message": f"编号 {audit_id} 的策略审计记录不存在",
+                               "details": []}},
+        )
+    audit_out = dict(audit)
+    audit_out["audit_id"] = audit_id
+    return JSONResponse(content=audit_out)

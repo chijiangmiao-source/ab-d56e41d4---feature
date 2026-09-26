@@ -155,3 +155,101 @@ def test_malformed_json_body(client):
                     headers={"content-type": "application/json"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "INVALID_JSON"
+
+
+# --------------------------------------------------------------------------
+# 策略审计：有限奇偶博弈、胜方区域与位置策略
+# --------------------------------------------------------------------------
+
+
+def danger_payload():
+    return {
+        "locations": ["d", "s0"],
+        "initial": "s0",
+        "propositions": [{"location": "s0", "proposition": "safe"}],
+        "transitions": [
+            {"id": "e1", "source": "s0", "target": "s0"},
+            {"id": "e2", "source": "s0", "target": "d"},
+        ],
+        "formula": "νX.(safe & []X)",
+    }
+
+
+def test_audit_safe_self_loop_yields_verifier_strategy(client):
+    rid = client.post("/api/v1/reviews", json=safe_payload()).json()["review_id"]
+    r = client.post(f"/api/v1/reviews/{rid}/audits")
+    assert r.status_code == 201
+    body = r.json()
+    assert body["source"]["review_id"] == rid
+    assert body["conclusion"]["winner"] == "verifier"
+    assert body["conclusion"]["guarantees"] == "satisfaction"
+    assert body["conclusion"]["consistent_with_review"] is True
+    assert body["strategy"]["player"] == "verifier"
+    assert body["strategy"]["memoryless"] is True
+    # 挑战方（对手）每种合法选择都进入验证方胜区
+    opp = body["opponent_choices"]
+    assert opp["player"] == "challenger"
+    assert opp["all_choices_stay_in_winner_region"] is True
+    assert opp["vertices"]
+    for info in opp["vertices"].values():
+        for choice in info["choices"]:
+            assert choice["target_region"] == "verifier"
+    # 按编号再次读取：结论、区域与策略一致
+    aid = body["audit_id"]
+    again = client.get(f"/api/v1/audits/{aid}")
+    assert again.status_code == 200
+    got = again.json()
+    assert got["audit_id"] == aid
+    assert got["conclusion"] == body["conclusion"]
+    assert got["winning_regions"] == body["winning_regions"]
+    assert got["strategy"] == body["strategy"]
+
+
+def test_audit_dangerous_successor_yields_challenger_strategy(client):
+    rid = client.post("/api/v1/reviews", json=danger_payload()).json()["review_id"]
+    r = client.post(f"/api/v1/reviews/{rid}/audits")
+    assert r.status_code == 201
+    body = r.json()
+    assert body["conclusion"]["winner"] == "challenger"
+    assert body["conclusion"]["guarantees"] == "unsatisfaction"
+    assert body["conclusion"]["consistent_with_review"] is True
+    assert body["strategy"]["player"] == "challenger"
+    # 挑战方策略：s0 的 [] 选择点经危险迁移 e2 走向 d
+    moves = body["strategy"]["moves"]
+    box_move = next(m for m in moves.values() if m["via_transitions"] == ["e2"])
+    assert box_move["to_location"] == "d"
+    # 每个顶点都有胜方区域；对手（验证方）选择点列出所有合法去向
+    regions = body["winning_regions"]
+    total = set(regions["verifier"]) | set(regions["challenger"])
+    assert len(total) == body["game"]["vertex_count"]
+    aid = body["audit_id"]
+    again = client.get(f"/api/v1/audits/{aid}").json()
+    assert again["conclusion"]["winner"] == "challenger"
+    assert again["strategy"]["moves"] == moves
+
+
+def test_audit_mu_reachability_verifier_strategy(client):
+    rid = client.post("/api/v1/reviews", json=reach_payload()).json()["review_id"]
+    body = client.post(f"/api/v1/reviews/{rid}/audits").json()
+    assert body["conclusion"]["winner"] == "verifier"
+    moves = body["strategy"]["moves"]
+    # 验证方在 s1 的 <> 选择点走向 g
+    dia = next(m for m in moves.values() if m["to_location"] == "g"
+               and m["via_transitions"] == ["e2"])
+    assert dia["target_region"] == "verifier"
+    # 顶点 x 不可达 goal：其根顶点在挑战方胜区
+    assert "x#0" in body["winning_regions"]["challenger"]
+
+
+def test_audit_requires_existing_review_and_persists_count(client):
+    assert client.post("/api/v1/reviews/9999/audits").status_code == 404
+    assert client.get("/api/v1/audits/9999").status_code == 404
+    before = client.get("/healthz").json()
+    rid = client.post("/api/v1/reviews", json=safe_payload()).json()["review_id"]
+    client.post(f"/api/v1/reviews/{rid}/audits")
+    after = client.get("/healthz").json()
+    assert after["audits"] == before["audits"] + 1
+    # 复核创建/读取行为不变
+    got = client.get(f"/api/v1/reviews/{rid}").json()
+    assert got["conclusion"]["satisfied_set"] == ["s0", "s1"]
+    assert got["evidence"]["fixpoint_iterations"][0]["stable"] == ["s0", "s1"]

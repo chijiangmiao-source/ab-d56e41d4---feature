@@ -30,6 +30,16 @@ class ReviewStore:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    payload TEXT NOT NULL
+                )
+                """
+            )
             self._conn.commit()
 
     def create(self, payload: dict[str, Any]) -> int:
@@ -49,6 +59,31 @@ class ReviewStore:
         if row is None:
             return None
         return json.loads(row["payload"])
+
+    def create_audit(self, review_id: int, payload: dict[str, Any]) -> int:
+        data = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO audits (review_id, payload) VALUES (?, ?)",
+                (review_id, data),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_audit(self, audit_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM audits WHERE id = ?", (audit_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["payload"])
+
+    def count_audits(self) -> int:
+        with self._lock:
+            return int(
+                self._conn.execute("SELECT COUNT(*) AS c FROM audits").fetchone()["c"]
+            )
 
     def count(self) -> int:
         with self._lock:
