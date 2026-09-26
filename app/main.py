@@ -1,8 +1,10 @@
-"""固定点复核 HTTP 接口。
+"""固定点复核与策略审计 HTTP 接口。
 
-POST /api/v1/reviews          创建复核（校验失败不落库、不返回编号）
-GET  /api/v1/reviews/{id}     按编号读取结论与规范证据
-GET  /healthz                 健康检查
+POST /api/v1/reviews                    创建复核（校验失败不落库、不返回编号）
+GET  /api/v1/reviews/{id}               按编号读取结论与规范证据
+POST /api/v1/reviews/{id}/audits        对已保存复核发起策略审计（奇偶博弈求解）
+GET  /api/v1/audits/{id}                按编号读取审计：胜方区域、无记忆策略与对手选项
+GET  /healthz                           健康检查
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
+from .audit import build_audit
 from .service import RequestError, build_review
 from .storage import ReviewStore
 
@@ -35,7 +38,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="中子束联锁固定点复核接口",
-    description="对含递归（μ/ν 固定点）定义的放行条件进行模型检验并持久化证据",
+    description="对含递归（μ/ν 固定点）定义的放行条件进行模型检验、持久化证据，"
+                "并在已保存复核上发起奇偶博弈策略审计",
     version=__version__,
     lifespan=lifespan,
 )
@@ -66,7 +70,12 @@ async def request_error_handler(_: Request, exc: RequestError) -> JSONResponse:
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     store = _store_or_503()
-    return {"status": "ok", "version": __version__, "reviews": store.count()}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "reviews": store.count(),
+        "audits": store.count_audits(),
+    }
 
 
 @app.post("/api/v1/reviews", status_code=201)
@@ -115,3 +124,39 @@ async def read_review(review_id: int) -> JSONResponse:
     record_out = dict(record)
     record_out["review_id"] = review_id
     return JSONResponse(content=record_out)
+
+
+@app.post("/api/v1/reviews/{review_id}/audits", status_code=201)
+async def create_audit(review_id: int) -> JSONResponse:
+    store = _store_or_503()
+    record = store.get(review_id)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND",
+                               "message": f"编号 {review_id} 的复核记录不存在，"
+                                          "无法发起策略审计",
+                               "details": []}},
+        )
+    # 基于已持久化的复核请求重建模型：公式闭包 × 位置 × 绑定层级构成有限
+    # 奇偶博弈，按 μ/ν 嵌套优先级精确求解后整体落库。
+    audit = build_audit(record, review_id)
+    audit_id = store.create_audit(review_id, audit)
+    audit_out = dict(audit)
+    audit_out["audit_id"] = audit_id
+    return JSONResponse(status_code=201, content=audit_out)
+
+
+@app.get("/api/v1/audits/{audit_id}")
+async def read_audit(audit_id: int) -> JSONResponse:
+    audit = _store_or_503().get_audit(audit_id)
+    if audit is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND",
+                               "message": f"编号 {audit_id} 的策略审计不存在",
+                               "details": []}},
+        )
+    audit_out = dict(audit)
+    audit_out["audit_id"] = audit_id
+    return JSONResponse(content=audit_out)

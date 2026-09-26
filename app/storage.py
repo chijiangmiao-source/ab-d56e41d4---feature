@@ -1,7 +1,8 @@
-"""复核记录持久化（SQLite）。
+"""复核记录与策略审计持久化（SQLite）。
 
-仅当全部静态校验通过、固定点求值完成后才写入记录；
+仅当全部静态校验通过、固定点求值完成后才写入复核记录；
 校验失败的请求不会获得编号，也不会产生任何数据。
+策略审计挂在已持久化的复核之下，单独编号、单独读取。
 """
 
 from __future__ import annotations
@@ -25,6 +26,16 @@ class ReviewStore:
                 """
                 CREATE TABLE IF NOT EXISTS reviews (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    payload TEXT NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id INTEGER NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     payload TEXT NOT NULL
                 )
@@ -54,6 +65,31 @@ class ReviewStore:
         with self._lock:
             return int(
                 self._conn.execute("SELECT COUNT(*) AS c FROM reviews").fetchone()["c"]
+            )
+
+    def create_audit(self, review_id: int, payload: dict[str, Any]) -> int:
+        data = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO audits (review_id, payload) VALUES (?, ?)",
+                (review_id, data),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_audit(self, audit_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM audits WHERE id = ?", (audit_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["payload"])
+
+    def count_audits(self) -> int:
+        with self._lock:
+            return int(
+                self._conn.execute("SELECT COUNT(*) AS c FROM audits").fetchone()["c"]
             )
 
     def close(self) -> None:

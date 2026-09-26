@@ -2,9 +2,11 @@
 
 场景与验收点：
 1. νX.(safe & []X)：安全自循环满足；ν 自全集单调下降至稳定，证据相邻两轮相等。
+1b. 策略审计：安全自循环得到验证方无记忆策略，挑战方每种合法选择均留在验证方胜区。
 2. μX.(goal | <>X)：可达 goal 的满足集自 ∅ 逐轮扩展至初始位置。
 3. 危险迁移：同一 ν 公式在初始位置不满足、不得放行。
-4. 悬空迁移：422 拒绝、persisted=false、不产生可读编号。
+3b. 策略审计：危险后继导致不放行时得到挑战方无记忆策略，且策略指向危险位置。
+4. 悬空迁移：422 拒绝、persisted=false、不产生可读编号；不存在的复核/审计编号为 404。
 
 成功时退出码 0；任一断言失败退出码 1。
 """
@@ -90,6 +92,34 @@ def main() -> int:
               and reread["evidence"]["fixpoint_iterations"][0]["stable"] == ["s0", "s1"],
               f"按编号 {nu_id} 读回结论与 ν 稳定证据")
 
+    # ---- 场景 1b：策略审计——安全自循环须得到验证方策略 ---------------------
+    print("场景 1b 策略审计：安全自循环的验证方策略")
+    status, audit = request("POST", f"/api/v1/reviews/{nu_id}/audits")
+    check(status == 201, "对已保存复核发起策略审计返回 201")
+    nu_audit_id = audit.get("audit_id") if status == 201 else None
+    if status == 201:
+        check(audit["review_id"] == nu_id, "审计记录来源复核编号")
+        check(audit["result"]["initial_winner"] == "verifier",
+              "初始顶点由验证方获胜（任意无限迁移下持续安全）")
+        check(audit["result"]["consistent_with_review"] is True,
+              "博弈胜方与复核满足结论一致")
+        check(audit["strategy"]["player"] == "verifier"
+              and audit["strategy"]["memoryless"] is True,
+              "生成验证方无记忆（与到达历史无关）策略")
+        verts = {v["id"]: v for v in audit["game"]["vertices"]}
+        check(all(verts[o["vertex"]]["owner"] == "challenger"
+                  for o in audit["opponent_options"]),
+              "对手选择点列表覆盖挑战方全部顶点")
+        check(all(opt["region"] == "verifier"
+                  for o in audit["opponent_options"] if o["in_winner_region"]
+                  for opt in o["options"]),
+              "挑战方每种合法选择均进入验证方胜区（无法逃脱）")
+        status, reread = request("GET", f"/api/v1/audits/{nu_audit_id}")
+        check(status == 200 and reread["audit_id"] == nu_audit_id
+              and reread["result"]["initial_winner"] == "verifier"
+              and reread["strategy"]["moves"] == audit["strategy"]["moves"],
+              f"按编号 {nu_audit_id} 经真实接口读回验证方策略")
+
     # ---- 场景 2：μ 扩展，可达 goal -----------------------------------------
     print("场景 2 μX.(goal | <>X) 可达 goal")
     mu_payload = {
@@ -159,6 +189,29 @@ def main() -> int:
               and reread["conclusion"]["release_permitted"] is False,
               f"按编号 {danger_id} 读回不放行结论")
 
+    # ---- 场景 3b：策略审计——危险后继导致不放行时须得到挑战方策略 -----------
+    print("场景 3b 策略审计：危险后继的挑战方策略")
+    status, audit = request("POST", f"/api/v1/reviews/{danger_id}/audits")
+    check(status == 201, "对不放行复核发起策略审计返回 201")
+    danger_audit_id = audit.get("audit_id") if status == 201 else None
+    if status == 201:
+        check(audit["result"]["initial_winner"] == "challenger",
+              "初始顶点由挑战方获胜（不满足可在无限迁移中持续保证）")
+        check(audit["result"]["consistent_with_review"] is True,
+              "博弈胜方与复核不放行结论一致")
+        check(audit["strategy"]["player"] == "challenger"
+              and audit["strategy"]["memoryless"] is True,
+              "生成挑战方无记忆策略")
+        box_moves = [m for m in audit["strategy"]["moves"]
+                     if m["kind"] == "box" and m["location"] == "s0"]
+        check(any(m["choose_location"] == "d" for m in box_moves),
+              "挑战方策略在 [] 选择点指向危险后继 d")
+        status, reread = request("GET", f"/api/v1/audits/{danger_audit_id}")
+        check(status == 200 and reread["audit_id"] == danger_audit_id
+              and reread["result"]["initial_winner"] == "challenger"
+              and reread["strategy"]["moves"] == audit["strategy"]["moves"],
+              f"按编号 {danger_audit_id} 经真实接口读回挑战方策略")
+
     # ---- 场景 4：悬空迁移必须被拒绝且不发编号 ------------------------------
     print("场景 4 悬空迁移拒绝")
     bad = dict(nu_payload)
@@ -174,6 +227,11 @@ def main() -> int:
     status, missing = request("GET", "/api/v1/reviews/999999")
     check(status == 404, "不存在的编号读取返回 404（无悬空记录可读）")
 
+    status, body = request("POST", "/api/v1/reviews/999999/audits")
+    check(status == 404, "对不存在的复核发起策略审计返回 404")
+    status, body = request("GET", "/api/v1/audits/999999")
+    check(status == 404, "不存在的审计编号读取返回 404")
+
     status, health2 = request("GET", "/healthz")
     expected = reviews_before + 3  # 仅三个合规场景落库
     check(status == 200 and health2["reviews"] == expected,
@@ -184,7 +242,8 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("\n冒烟验收全部通过：μ 扩展、ν 收敛、危险迁移拒绝放行、拒绝不发编号")
+    print("\n冒烟验收全部通过：μ 扩展、ν 收敛、危险迁移拒绝放行、拒绝不发编号、"
+          "安全自循环验证方策略、危险后继挑战方策略均可经真实接口读取")
     return 0
 
 
