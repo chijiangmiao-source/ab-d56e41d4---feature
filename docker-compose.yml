@@ -1,0 +1,38 @@
+services:
+  api:
+    build: .
+    image: fixpoint-review:latest
+    environment:
+      # 服务监听端口可配置：APP_PORT=9000 docker compose up
+      PORT: ${APP_PORT:-8080}
+      REVIEW_DB_PATH: /data/reviews.db
+    ports:
+      - "${APP_PORT:-8080}:${APP_PORT:-8080}"
+    volumes:
+      - review-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request,sys; p=os.environ.get('PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/healthz', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  verify:
+    image: fixpoint-review:latest
+    build: .
+    command: ["sh", "/app/scripts/run_verify.sh"]
+    environment:
+      SMOKE_BASE_URL: http://api:${APP_PORT:-8080}
+    depends_on:
+      api:
+        condition: service_healthy
+    # 单次验收结束即退出，退出码报告结果，不自动重启。
+    restart: "no"
+
+volumes:
+  review-data:
